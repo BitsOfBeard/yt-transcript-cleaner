@@ -483,70 +483,79 @@ def parse_vtt_cues(vtt_text: str) -> List[Cue]:
 def dedupe_cues(cues: List[Cue], mode: str) -> List[Cue]:
     """Remove duplicate cues based on the specified mode.
     
-    Args:
-        cues: List of Cue objects to deduplicate.
-        mode: Deduplication mode - "none", "consecutive", "consecutive-overlap", or "global".
-    
-    Returns:
-        Deduplicated list of Cue objects.
-    
-    Raises:
-        AppError: If an unsupported dedupe mode is provided.
+    Modes:
+        - "none":
+            No deduplication.
+        - "consecutive":
+            Remove only *exact* consecutive duplicate cues
+            (cue.text equal to immediately previous cue.text).
+        - "consecutive-overlap":
+            Remove word-level overlap only vs the immediately previous
+            accepted cue (local rolling-caption cleanup).
+        - "global":
+            Remove word-level overlap vs all accumulated text so far
+            (most aggressive – once something appears, it will not be
+             repeated in full later).
     """
     if mode == "none":
         return cues
 
     if mode == "consecutive":
-        # Remove consecutive duplicate text (exact string comparison)
-        result = []
-        previous = None
-        for cue in cues:
-            if cue.text != previous:
-                result.append(cue)
-            previous = cue.text
-        return result
+        # Exact consecutive duplicate removal
+        result: List[Cue] = []
+        previous_text: Optional[str] = None
 
-    if mode == "consecutive-overlap":
-        # Remove consecutive duplicates AND word-level overlap between adjacent cues
-        # This handles rolling captions where each cue partially repeats the previous one
-        result = []
-        accumulated_text = ""  # Track ALL text processed so far
-        
         for cue in cues:
-            current_text = cue.text
-            
-            # Find overlap with all accumulated text
-            new_text = find_overlap(accumulated_text, current_text)
+            if cue.text != previous_text:
+                result.append(cue)
+            previous_text = cue.text
+
+        return result
+    if mode == "consecutive-overlap":
+        result: List[Cue] = []
+        prev_text = ""
+
+        for cue in cues:
+            new_text = find_overlap(prev_text, cue.text)
             
             if new_text is None:
-                # This cue adds nothing new (it's entirely a repeat)
-                continue
+                continue  # Completely contained - skip
             
-            # Add the new text to result
-            if new_text:
-                result.append(Cue(start=cue.start, end=cue.end, text=new_text))
-                accumulated_text += " " + new_text
-                accumulated_text = accumulated_text.strip()
-            elif current_text.strip():
-                # Edge case: no overlap but add current text anyway
-                result.append(Cue(start=cue.start, end=cue.end, text=current_text))
-                accumulated_text += " " + current_text
-                accumulated_text = accumulated_text.strip()
-        
+            # Always add the new portion
+            result.append(Cue(start=cue.start, end=cue.end, text=new_text))
+            prev_text = (prev_text + " " + new_text).strip()
+
         return result
 
-
     if mode == "global":
-        # Remove all duplicate text globally (keeps first occurrence only)
-        result = []
-        seen = set()
+        # Aggressive global overlap vs ALL accumulated text so far
+        result: List[Cue] = []
+        accumulated_text = ""  # Track all text we've kept so far
+
         for cue in cues:
-            if cue.text not in seen:
-                seen.add(cue.text)
-                result.append(cue)
+            current_text = cue.text
+
+            # Find overlap against all accumulated text
+            new_text = find_overlap(accumulated_text, current_text)
+
+            if new_text is None:
+                # This cue adds nothing new (entirely a repeat) – skip
+                continue
+
+            if new_text:
+                # Partial overlap: keep only the new part
+                result.append(Cue(start=cue.start, end=cue.end, text=new_text))
+                accumulated_text = (accumulated_text + " " + new_text).strip()
+            else:
+                # No overlap with accumulated text – keep full cue
+                if current_text.strip():
+                    result.append(cue)
+                    accumulated_text = (accumulated_text + " " + current_text).strip()
+
         return result
 
     raise AppError(f"Unsupported dedupe mode: {mode}")
+
 
 
 

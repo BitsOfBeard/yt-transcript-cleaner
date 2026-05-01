@@ -12,9 +12,10 @@ The desktop GUI is implemented using **PySide6 (Qt)**, and the core logic is sha
 - Subtitle cleaning: removes VTT markup and normalizes whitespace
 - Deduplication modes:
   - `consecutive`: removes exact duplicate cues that appear directly after each other
-  - `consecutive-overlap`: removes rolling-caption overlap from adjacent cues, useful for YouTube auto-generated captions
-  - `global`: removes repeated cue text across the whole transcript
+  - `consecutive-overlap`: removes rolling-caption overlap between adjacent cues, but only locally
+  - `global`: removes overlapping text against the entire transcript so far (most aggressive)
   - `none`: no deduplication
+
 - Optional timestamps
 - Chapter-aware handling:
   - `none`: single transcript file with no explicit chapter headings
@@ -31,11 +32,11 @@ The desktop GUI is implemented using **PySide6 (Qt)**, and the core logic is sha
 
 ## Deduplication modes explained
 
-YouTube subtitles can contain repeated text in different ways. This tool provides several deduplication modes to handle different cases.
+YouTube subtitles can contain repeated text in different ways. This tool provides several deduplication modes to handle different cases. All deduplication happens at the *cue text* level after cleaning VTT markup.
 
 ### `consecutive`
 
-Removes exact duplicate caption cues when they appear directly after each other.
+Removes **exact duplicate caption cues** when they appear directly after each other.
 
 Input:
 
@@ -52,11 +53,11 @@ Hello!
 Goodbye!
 ```
 
-This is useful when the subtitle file contains identical repeated cues.
+This is very conservative: it only removes a cue when its entire text is identical to the immediately previous cue. Rolling captions that slightly extend or change the text will not be affected.
 
 ### `consecutive-overlap`
 
-Removes overlapping text from adjacent cues. This is especially useful for YouTube auto-generated subtitles, which often use rolling captions.
+Removes **word-level overlap between adjacent cues only**. This is especially useful for YouTube auto-generated subtitles that use rolling captions, where each cue partially repeats the previous one.
 
 Input:
 
@@ -72,13 +73,26 @@ Output:
 Hello there. Master Hellish here, and welcome to a very special trip down memory lane.
 ```
 
-This is the recommended mode when auto-generated captions produce repeated phrases in the final transcript.
+How it works (simplified):
+
+- For each new cue, we compare it only against the **immediately previous kept cue**.
+- Any overlapping words at the junction are removed from the new cue so only the “new” portion is kept.
+- If a cue is entirely contained in the previous cue’s text, it is skipped.
+
+Use this when you want to clean up rolling overlap but still allow phrases to be repeated naturally later in the video.
 
 ### `global`
 
-Removes repeated cue text across the whole transcript, not just adjacent cues.
+Removes **word-level overlap against all accumulated text so far**. This is the most aggressive mode.
 
-Input:
+Conceptually:
+
+- We keep an “accumulated transcript”.
+- For each new cue, we look for overlap between the end of the accumulated transcript and the beginning of the cue.
+- Only the non-overlapping “new” portion of the cue is added.
+- If a cue is entirely contained in what has already been kept, it is skipped.
+
+Example:
 
 ```text
 Welcome back.
@@ -87,7 +101,7 @@ Welcome back.
 Let's begin.
 ```
 
-Output:
+In `global` mode, the second “Welcome back.” contributes nothing new and will be removed/trimmed based on overlap:
 
 ```text
 Welcome back.
@@ -95,11 +109,13 @@ Today we are looking at trains.
 Let's begin.
 ```
 
-Use this carefully, since repeated phrases can be intentional in spoken content.
+This can significantly compress repetitive content (good for LLM input), but it will also remove intentional repetition. Use it when you want a **maximally non-redundant** transcript and don’t mind losing repeated phrases.
 
 ### `none`
 
 Disables deduplication.
+
+The transcript is produced directly from the parsed cues (after VTT tag stripping and whitespace normalization), without any attempt to remove duplicates or overlaps.
 
 ## Installation
 
@@ -481,7 +497,25 @@ python -m yt_transcript_cleaner --cli \
   --dedupe consecutive-overlap
 ```
 
-You can also try listing available subtitles with `--list-subs` and choosing manual captions if they are available.
+`consecutive-overlap` is usually the best choice for YouTube auto-generated captions:
+it removes rolling overlap between adjacent cues while still allowing phrases to be
+repeated naturally later in the video.
+
+If you want the most compressed, non-redundant transcript (for example, to feed into
+an LLM), you can use the more aggressive `global` mode:
+
+```bash
+python -m yt_transcript_cleaner --cli \
+  --url "VIDEO_ID" \
+  --dedupe global
+```
+
+`global` removes overlapping text against everything that has already appeared in the
+transcript so far, which means intentional repetition in the speech may also be
+removed.
+
+You can also try listing available subtitles with `--list-subs` and choosing manual
+captions if they are available.
 
 ### Encoding issues
 

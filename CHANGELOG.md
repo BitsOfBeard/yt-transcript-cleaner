@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-05-01
+
+### Changed
+
+- Refined **deduplication modes** in `core.py` to better match their names and provide more useful behavior for YouTube transcripts:
+  - `consecutive`:
+    - Now strictly removes only **exact consecutive duplicate cues** (identical `text` appearing immediately after each other).
+    - This is a conservative mode that avoids altering rolling captions unless they contain literal back-to-back duplicates.
+  - `consecutive-overlap`:
+    - Now performs **word-level overlap removal only between adjacent cues**.
+    - Designed for rolling/auto captions where each cue partially repeats the previous one.
+    - Compares each cue only against the **immediately previous kept cue**, trimming the overlapping part and keeping only the new portion.
+  - `global`:
+    - Now performs **word-level overlap removal against all accumulated text so far**.
+    - This is the most aggressive mode: once text has appeared in the transcript, any later cue that only repeats it is skipped or trimmed so that only genuinely new text remains.
+- Updated README documentation for deduplication modes to describe:
+  - The new behavior of `consecutive`, `consecutive-overlap`, and `global`.
+  - Practical caveats and recommended usage (e.g. `consecutive-overlap` for auto-generated captions, `global` for maximally compressed transcripts).
+
+### Notes
+
+- These changes affect how deduplication behaves compared to version `0.2.0`, but there were no external users at the time of the change.
+- CLI and GUI still expose the same `--dedupe` options (`consecutive`, `consecutive-overlap`, `global`, `none`); only their internal behavior has been refined.
+
+
 ## [0.2.0] - 2026-05-01
 
 ### Added
