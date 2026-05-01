@@ -1,22 +1,45 @@
 """
-GUI for YouTube Transcript Cleaner.
+PySide6 GUI for YouTube Transcript Cleaner.
 
-This module provides a tkinter-based graphical user interface for downloading
+This module provides a Qt-based graphical user interface for downloading
 and cleaning YouTube video subtitles using yt-dlp.
 """
 
+import json
 import os
 import platform
 import subprocess
 import sys
 import threading
-import json
+import traceback
 from pathlib import Path
-from typing import List, Optional
-from queue import Queue
-from tkinter import ttk, filedialog, messagebox
+from typing import Any, Dict, List, Optional
 
-import tkinter as tk
+from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
+from PySide6.QtGui import QCloseEvent
+from PySide6.QtWidgets import (
+    QApplication,
+    QButtonGroup,
+    QCheckBox,
+    QComboBox,
+    QFileDialog,
+    QFormLayout,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QRadioButton,
+    QSizePolicy,
+    QSpacerItem,
+    QVBoxLayout,
+    QWidget,
+    QLayout,
+)
 
 from .core import (
     DEFAULT_LANG_PRIORITY,
@@ -25,342 +48,594 @@ from .core import (
     process_urls,
 )
 
-# Dark mode colors
-DARK_BG = "#2b2b2b"
-DARK_FG = "#e0e0e0"
-DARK_ENTRY_BG = "#3b3b3b"
-DARK_ENTRY_FG = "#ffffff"
-DARK_BUTTON_BG = "#404040"
-DARK_BUTTON_FG = "#ffffff"
-DARK_BUTTON_HOVER = "#505050"
-DARK_FRAME_BG = "#333333"
-DARK_SELECT_BG = "#0078d4"
-DARK_SELECT_FG = "#ffffff"
 
-# Light mode colors (for reference/to toggle back)
-LIGHT_BG = "#f0f0f0"
-LIGHT_FG = "#000000"
-
-# Config file path
 CONFIG_FILE = Path.home() / ".yt_transcript_cleaner_config.json"
 
 
-class TranscriptCleanerApp(tk.Tk):
-    """Main application window for the transcript cleaner GUI."""
+THEME_COLORS = {
+    "light": {
+        "window": "#f0f0f0",
+        "panel": "#f8f8f8",
+        "panel_border": "#c8c8c8",
+        "text": "#000000",
+        "muted": "#404040",
+        "input": "#ffffff",
+        "input_text": "#000000",
+        "button": "#e8e8e8",
+        "button_hover": "#dddddd",
+        "button_pressed": "#cccccc",
+        "accent": "#0078d4",
+        "selection_text": "#ffffff",
+        "disabled_text": "#808080",
+        "log": "#ffffff",
+        "titlebar": "#f0f0f0",
+        "titlebar_text": "#000000",
+    },
+    "dark": {
+        "window": "#202020",
+        "panel": "#2b2b2b",
+        "panel_border": "#444444",
+        "text": "#e0e0e0",
+        "muted": "#b0b0b0",
+        "input": "#303030",
+        "input_text": "#ffffff",
+        "button": "#3a3a3a",
+        "button_hover": "#505050",
+        "button_pressed": "#606060",
+        "accent": "#0078d4",
+        "selection_text": "#ffffff",
+        "disabled_text": "#777777",
+        "log": "#242424",
+        "titlebar": "#202020",
+        "titlebar_text": "#ffffff",
+    },
+    "oled": {
+        "window": "#000000",
+        "panel": "#000000",
+        "panel_border": "#202020",
+        "text": "#d0d0d0",
+        "muted": "#a0a0a0",
+        "input": "#080808",
+        "input_text": "#ffffff",
+        "button": "#101010",
+        "button_hover": "#252525",
+        "button_pressed": "#303030",
+        "accent": "#1e90ff",
+        "selection_text": "#ffffff",
+        "disabled_text": "#606060",
+        "log": "#000000",
+        "titlebar": "#000000",
+        "titlebar_text": "#ffffff",
+    },
+}
 
-    def __init__(self) -> None:
-        """Initialize the application."""
+
+def _default_config() -> Dict[str, Any]:
+    return {
+        "theme": "oled",
+        "dark_mode": False,
+        "dedupe": "consecutive",
+        "format": "txt",
+        "with_timestamps": True,
+        "chapter_split": False,
+        "chapter_mode": "none",
+        "no_auto": False,
+        "no_merge": False,
+        "keep_vtt": False,
+        "list_subs": False,
+        "summary_template": False,
+        "quiet": False,
+        "verbose": False,
+        "langs": ",".join(DEFAULT_LANG_PRIORITY),
+        "outdir": str(Path.cwd()),
+        "cookies_from_browser": "",
+        "output_name": "",
+    }
+
+
+def load_config() -> Dict[str, Any]:
+    config = _default_config()
+    loaded_config: Dict[str, Any] = {}
+
+    if CONFIG_FILE.exists():
+        try:
+            with CONFIG_FILE.open("r", encoding="utf-8") as f:
+                loaded_config = json.load(f)
+            if isinstance(loaded_config, dict):
+                config.update(loaded_config)
+        except Exception as e:
+            print(f"Error loading config: {e}")
+
+    if "theme" not in loaded_config and "dark_mode" in loaded_config:
+        config["theme"] = "dark" if loaded_config.get("dark_mode") else "light"
+
+    if "chapter_mode" not in loaded_config:
+        config["chapter_mode"] = "files" if loaded_config.get("chapter_split") else "none"
+
+    if config.get("theme") not in ("light", "dark", "oled"):
+        config["theme"] = "oled"
+
+    if config.get("format") not in OUTPUT_FORMATS:
+        config["format"] = OUTPUT_FORMATS[0]
+
+    if config.get("dedupe") not in ("consecutive", "consecutive-overlap", "global", "none"):
+        config["dedupe"] = "consecutive"
+
+    if config.get("chapter_mode") not in ("none", "inline", "files"):
+        config["chapter_mode"] = "none"
+
+    return config
+
+
+def set_combo_value(combo: QComboBox, value: str, fallback_index: int = 0) -> None:
+    index = combo.findText(value)
+    combo.setCurrentIndex(index if index >= 0 else fallback_index)
+
+
+def qss_for_theme(theme: str) -> str:
+    c = THEME_COLORS[theme]
+
+    return f"""
+    QWidget {{
+        background-color: {c["window"]};
+        color: {c["text"]};
+        selection-background-color: {c["accent"]};
+        selection-color: {c["selection_text"]};
+    }}
+
+    QMainWindow {{
+        background-color: {c["window"]};
+    }}
+
+    QLabel {{
+        background-color: transparent;
+        color: {c["text"]};
+    }}
+
+    QLabel#TitleLabel {{
+        font-size: 18px;
+        font-weight: 700;
+        color: {c["text"]};
+    }}
+
+    QGroupBox {{
+        background-color: {c["panel"]};
+        border: 1px solid {c["panel_border"]};
+        border-radius: 6px;
+        margin-top: 16px;
+        padding: 0px;
+        font-weight: 600;
+    }}
+
+
+    QGroupBox::title {{
+        subcontrol-origin: margin;
+        left: 10px;
+        padding: 0 5px;
+        color: {c["text"]};
+        background-color: {c["window"]};
+    }}
+
+    QLineEdit,
+    QComboBox {{
+        background-color: {c["input"]};
+        color: {c["input_text"]};
+        border: 1px solid {c["panel_border"]};
+        border-radius: 4px;
+        padding-left: 6px;
+        padding-right: 6px;
+        padding-top: 2px;
+        padding-bottom: 2px;
+        selection-background-color: {c["accent"]};
+        selection-color: {c["selection_text"]};
+    }}
+
+    QPlainTextEdit {{
+        background-color: {c["log"]};
+        color: {c["input_text"]};
+        border: 1px solid {c["panel_border"]};
+        border-radius: 4px;
+        padding: 5px;
+        font-family: Consolas, "Cascadia Mono", monospace;
+        font-size: 10pt;
+        selection-background-color: {c["accent"]};
+        selection-color: {c["selection_text"]};
+    }}
+
+    QLineEdit:disabled,
+    QComboBox:disabled {{
+        color: {c["disabled_text"]};
+        background-color: {c["panel"]};
+    }}
+
+    QPushButton {{
+        background-color: {c["button"]};
+        color: {c["text"]};
+        border: 1px solid {c["panel_border"]};
+        border-radius: 4px;
+        padding: 6px 12px;
+        min-height: 24px;
+    }}
+
+    QPushButton:hover {{
+        background-color: {c["button_hover"]};
+    }}
+
+    QPushButton:pressed {{
+        background-color: {c["button_pressed"]};
+    }}
+
+    QPushButton:disabled {{
+        color: {c["disabled_text"]};
+        background-color: {c["panel"]};
+    }}
+
+    QCheckBox,
+    QRadioButton {{
+        background-color: transparent;
+        color: {c["text"]};
+        spacing: 6px;
+    }}
+
+    QCheckBox:disabled,
+    QRadioButton:disabled {{
+        color: {c["disabled_text"]};
+    }}
+
+    QComboBox::drop-down {{
+        border-left: 1px solid {c["panel_border"]};
+        width: 24px;
+        background-color: {c["button"]};
+    }}
+
+    QComboBox QAbstractItemView {{
+        background-color: {c["input"]};
+        color: {c["input_text"]};
+        border: 1px solid {c["panel_border"]};
+        selection-background-color: {c["accent"]};
+        selection-color: {c["selection_text"]};
+    }}
+
+    QScrollBar:vertical {{
+        background-color: {c["window"]};
+        width: 14px;
+        margin: 0;
+    }}
+
+    QScrollBar::handle:vertical {{
+        background-color: {c["button"]};
+        border-radius: 6px;
+        min-height: 20px;
+    }}
+
+    QScrollBar::handle:vertical:hover {{
+        background-color: {c["button_hover"]};
+    }}
+
+    QScrollBar::add-line:vertical,
+    QScrollBar::sub-line:vertical {{
+        height: 0;
+    }}
+
+    QStatusBar {{
+        background-color: {c["panel"]};
+        color: {c["text"]};
+        border-top: 1px solid {c["panel_border"]};
+    }}
+
+    QMessageBox {{
+        background-color: {c["window"]};
+        color: {c["text"]};
+    }}
+    """
+
+
+class ProcessWorker(QObject):
+    log = Signal(str)
+    done = Signal(object)
+    error = Signal(str)
+    status = Signal(str)
+    finished = Signal()
+
+    def __init__(
+        self,
+        urls: List[str],
+        options: ProcessOptions,
+        cancel_event: threading.Event,
+    ) -> None:
         super().__init__()
-        self.title("YouTube Transcript Cleaner")
-        self.geometry("900x700")
-        self.minsize(700, 600)
+        self.urls = urls
+        self.options = options
+        self.cancel_event = cancel_event
 
-        self.queue: Queue[tuple] = Queue()
-        self.worker_thread: Optional[threading.Thread] = None
+    @Slot()
+    def run(self) -> None:
+        try:
+            def log_callback(message: str) -> None:
+                self.log.emit(message)
+
+            result_paths = process_urls(
+                urls=self.urls,
+                options=self.options,
+                log_callback=log_callback,
+                cancel_event=self.cancel_event,
+            )
+
+            if self.cancel_event.is_set():
+                self.log.emit("\nCancelled.")
+                self.status.emit("Cancelled")
+            else:
+                self.done.emit(result_paths)
+                self.log.emit(f"\nCompleted. Generated {len(result_paths)} file(s).")
+                self.status.emit("Ready")
+        except Exception:
+            self.error.emit(traceback.format_exc())
+            self.status.emit("Error")
+        finally:
+            self.finished.emit()
+
+
+class TranscriptCleanerWindow(QMainWindow):
+    def __init__(self) -> None:
+        super().__init__()
+
+        self.config = load_config()
+        self.worker_thread: Optional[QThread] = None
+        self.worker: Optional[ProcessWorker] = None
         self.cancel_event = threading.Event()
         self.running = False
+        self.closing_after_cancel = False
 
-        # Load config before building UI (dark_mode_var needs to exist)
-        self._load_config()
+        self.setWindowTitle("YouTube Transcript Cleaner")
+        self.resize(900, 700)
+        # self.setMinimumSize(700, 600)  # removed: we will derive min size from layouts
 
-        # Set up UI
-        self.build_ui()
-
-        # Configure widgets based on initial state
+        self._build_ui()
+        self._load_values_into_ui()
         self._toggle_url_file_fields()
+        self._apply_theme(save=False)
 
-        # Apply dark mode if enabled
-        if self.dark_mode_var.get():
-            self._apply_dark_mode()
+        # Let Qt compute the natural minimum size from layouts and widgets,
+        # then use that as the true minimum so rows don’t get compressed.
+        self.adjustSize()
+        self.setMinimumSize(self.size())
 
-
-        # Start queue polling
-        self.after(100, self.poll_queue)
-        # Save config when window closes
-        self.protocol("WM_DELETE_WINDOW", self._on_closing)
+        QTimer.singleShot(0, self._apply_windows_titlebar)
 
 
-    def build_ui(self) -> None:
-        """Build the user interface."""
-        # Configure grid weights
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(8, weight=1)  # Output / log area
+    def _configure_grid_layout(
+        self,
+        layout: QGridLayout,
+        row_count: int,
+        top_margin: int = 22,
+    ) -> None:
+        layout.setContentsMargins(12, top_margin, 12, 12)
+        layout.setHorizontalSpacing(10)
+        layout.setVerticalSpacing(8)
 
-        # Title
-        title = ttk.Label(
-            self,
-            text="YouTube Transcript Cleaner",
-            font=("Helvetica", 16, "bold"),
-        )
-        title.grid(row=0, column=0, padx=20, pady=(20, 10), sticky="w")
+        row_height = max(28, self.fontMetrics().height() + 12)
 
-        # Input Section
-        input_frame = ttk.LabelFrame(self, text="Input")
-        input_frame.grid(row=1, column=0, padx=20, pady=10, sticky="ew")
+        for row in range(row_count):
+            layout.setRowMinimumHeight(row, row_height)
 
-        # URL or file mode toggle
-        self.mode_var = tk.StringVar(value="url")
-        url_radio = ttk.Radiobutton(
-            input_frame,
-            text="Single URL / Video ID:",
-            variable=self.mode_var,
-            value="url",
-            command=self._toggle_url_file_fields,
-        )
-        url_radio.grid(row=0, column=0, padx=10, pady=10, sticky="w")
+    def _build_ui(self) -> None:
+        central = QWidget()
+        self.setCentralWidget(central)
 
-        file_radio = ttk.Radiobutton(
-            input_frame,
-            text="URL File (batch mode):",
-            variable=self.mode_var,
-            value="file",
-            command=self._toggle_url_file_fields,
-        )
-        file_radio.grid(row=1, column=0, padx=10, pady=5, sticky="w")
+        root = QVBoxLayout(central)
+        root.setContentsMargins(20, 18, 20, 12)
+        root.setSpacing(10)
+        root.setSizeConstraint(QVBoxLayout.SetMinimumSize)
 
-        # URL Entry
-        self.url_entry = ttk.Entry(input_frame, width=60)
-        self.url_entry.grid(row=0, column=1, padx=10, pady=10, columnspan=2, sticky="ew")
-        input_frame.columnconfigure(1, weight=1)
+        title = QLabel("YouTube Transcript Cleaner")
+        title.setObjectName("TitleLabel")
+        root.addWidget(title)
 
-        # URL File Entry
-        self.url_file_entry = ttk.Entry(input_frame, width=50)
-        self.url_file_entry.grid(row=1, column=1, padx=10, pady=5, sticky="ew")
+        input_group = QGroupBox("Input")
+        input_layout = QGridLayout(input_group)
+        self._configure_grid_layout(input_layout, row_count=2)
+        input_layout.setColumnStretch(1, 1)
 
-        # URL File Browse
-        url_file_browse = ttk.Button(
-            input_frame,
-            text="Browse…",
-            command=self.browse_url_file,
-        )
-        url_file_browse.grid(row=1, column=2, padx=10, pady=5, sticky="e")
+        self.single_url_radio = QRadioButton("Single URL / Video ID:")
+        self.url_file_radio = QRadioButton("URL File (batch mode):")
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.addButton(self.single_url_radio)
+        self.mode_group.addButton(self.url_file_radio)
+        self.single_url_radio.setChecked(True)
 
-        # Main Options Section
-        main_frame = ttk.LabelFrame(self, text="Main Options")
-        main_frame.grid(row=2, column=0, padx=20, pady=10, sticky="ew")
+        self.url_entry = QLineEdit()
+        self.url_file_entry = QLineEdit()
+        self.url_file_browse_button = QPushButton("Browse…")
+        self.url_file_browse_button.clicked.connect(self.browse_url_file)
 
-        # Output directory (use value from _load_config)
-        ttk.Label(main_frame, text="Output Directory:").grid(
-            row=0, column=0, padx=10, pady=5, sticky="w"
-        )
-        self.outdir_entry = ttk.Entry(main_frame, width=50)
-        self.outdir_entry.insert(0, self.outdir_value)
-        self.outdir_entry.grid(row=0, column=1, padx=10, pady=5, sticky="ew")
-        outdir_browse = ttk.Button(
-            main_frame,
-            text="Browse…",
-            command=self.browse_outdir,
-        )
-        outdir_browse.grid(row=0, column=2, padx=10, pady=5, sticky="e")
+        self.single_url_radio.toggled.connect(self._toggle_url_file_fields)
+        self.url_file_radio.toggled.connect(self._toggle_url_file_fields)
 
-        # Output name (use value from _load_config)
-        ttk.Label(main_frame, text="Output Name (optional):").grid(
-            row=1, column=0, padx=10, pady=5, sticky="w"
-        )
-        self.output_name_entry = ttk.Entry(main_frame, width=50)
-        self.output_name_entry.insert(0, self.output_name_value)
-        self.output_name_entry.grid(row=1, column=1, padx=10, pady=5, sticky="ew")
+        input_layout.addWidget(self.single_url_radio, 0, 0)
+        input_layout.addWidget(self.url_entry, 0, 1, 1, 2)
+        input_layout.addWidget(self.url_file_radio, 1, 0)
+        input_layout.addWidget(self.url_file_entry, 1, 1)
+        input_layout.addWidget(self.url_file_browse_button, 1, 2)
 
-        main_frame.columnconfigure(1, weight=1)
+        root.addWidget(input_group)
 
-        # Format (use var from _load_config)
-        ttk.Label(main_frame, text="Output Format:").grid(
-            row=2, column=0, padx=10, pady=5, sticky="w"
-        )
-        # format_var already created in _load_config()
-        format_combo = ttk.Combobox(
-            main_frame,
-            textvariable=self.format_var,
-            values=OUTPUT_FORMATS,
-            width=47,
-            state="readonly",
-        )
-        format_combo.grid(row=2, column=1, pady=5, padx=10, sticky="ew")
+        main_group = QGroupBox("Main Options")
+        main_layout = QGridLayout(main_group)
+        self._configure_grid_layout(main_layout, row_count=5)
+        main_layout.setColumnStretch(1, 1)
 
-        # Timestamps (use var from _load_config)
-        timestamps_check = ttk.Checkbutton(
-            main_frame,
-            text="Include Timestamps",
-            variable=self.timestamps_var,
-        )
-        timestamps_check.grid(row=3, column=0, padx=10, pady=5, sticky="w")
+        self.outdir_entry = QLineEdit()
+        self.outdir_browse_button = QPushButton("Browse…")
+        self.outdir_browse_button.clicked.connect(self.browse_outdir)
 
-        # Chapter Split (use var from _load_config)
-        chapter_split_check = ttk.Checkbutton(
-            main_frame,
-            text="Split by Chapters",
-            variable=self.chapter_split_var,
-        )
-        chapter_split_check.grid(row=3, column=1, padx=10, pady=5, sticky="w")
+        self.output_name_entry = QLineEdit()
 
-        # Language Priority (use value from _load_config)
-        ttk.Label(main_frame, text="Language Priority (comma-separated):").grid(
-            row=4, column=0, padx=10, pady=5, sticky="w"
-        )
-        self.langs_entry = ttk.Entry(main_frame, width=50)
-        self.langs_entry.insert(0, self.langs_entry_value)
-        self.langs_entry.grid(row=4, column=1, columnspan=2, padx=10, pady=5, sticky="ew")
+        self.format_combo = QComboBox()
+        self.format_combo.addItems(list(OUTPUT_FORMATS))
 
-        # Advanced Options Section
-        adv_frame = ttk.LabelFrame(self, text="Advanced Options")
-        adv_frame.grid(row=3, column=0, padx=20, pady=10, sticky="ew")
+        self.timestamps_check = QCheckBox("Include Timestamps")
 
-        # Disable auto captions (use var from _load_config)
-        no_auto_check = ttk.Checkbutton(
-            adv_frame,
-            text="Disable Auto Captions Fallback",
-            variable=self.no_auto_var,
-        )
-        no_auto_check.grid(row=0, column=0, padx=10, pady=5, sticky="w")
+        self.chapter_mode_combo = QComboBox()
+        self.chapter_mode_combo.addItems(["none", "inline", "files"])
 
-        # Dedupe mode (use var from _load_config)
-        ttk.Label(adv_frame, text="Deduplication Mode:").grid(
-            row=0, column=1, padx=10, pady=5, sticky="w"
-        )
-        # dedupe_var already created in _load_config()
-        dedupe_combo = ttk.Combobox(
-            adv_frame,
-            textvariable=self.dedupe_var,
-            values=["consecutive", "consecutive-overlap", "global", "none"],
-            width=20,
-            state="readonly",
-        )
-        dedupe_combo.grid(row=0, column=2, pady=5, padx=10, sticky="w")
+        self.langs_entry = QLineEdit()
 
-        # No merge (use var from _load_config)
-        no_merge_check = ttk.Checkbutton(
-            adv_frame,
-            text="Do Not Merge Captions",
-            variable=self.no_merge_var,
-        )
-        no_merge_check.grid(row=1, column=0, padx=10, pady=5, sticky="w")
+        main_layout.addWidget(QLabel("Output Directory:"), 0, 0)
+        main_layout.addWidget(self.outdir_entry, 0, 1)
+        main_layout.addWidget(self.outdir_browse_button, 0, 2)
 
-        # Keep VTT (use var from _load_config)
-        keep_vtt_check = ttk.Checkbutton(
-            adv_frame,
-            text="Keep Downloaded VTT Working Directory",
-            variable=self.keep_vtt_var,
-        )
-        keep_vtt_check.grid(row=1, column=1, padx=10, pady=5, sticky="w")
+        main_layout.addWidget(QLabel("Output Name (optional):"), 1, 0)
+        main_layout.addWidget(self.output_name_entry, 1, 1, 1, 2)
 
-        # List subtitles (use var from _load_config)
-        list_subs_check = ttk.Checkbutton(
-            adv_frame,
-            text="List Subtitles and Exit",
-            variable=self.list_subs_var,
-        )
-        list_subs_check.grid(row=2, column=0, padx=10, pady=5, sticky="w")
+        main_layout.addWidget(QLabel("Output Format:"), 2, 0)
+        main_layout.addWidget(self.format_combo, 2, 1, 1, 2)
 
-        # Summary template (use var from _load_config)
-        summary_template_check = ttk.Checkbutton(
-            adv_frame,
-            text="Generate Summary Prompt",
-            variable=self.summary_template_var,
-        )
-        summary_template_check.grid(row=2, column=1, padx=10, pady=5, sticky="w")
+        main_layout.addWidget(self.timestamps_check, 3, 0)
+        main_layout.addWidget(QLabel("Chapter Mode:"), 3, 1)
+        main_layout.addWidget(self.chapter_mode_combo, 3, 2)
 
-        # Cookies from browser (use value from _load_config)
-        ttk.Label(adv_frame, text="Cookies from Browser:").grid(
-            row=2, column=2, padx=10, pady=5, sticky="w"
-        )
-        self.cookies_entry = ttk.Entry(adv_frame, width=20)
-        self.cookies_entry.insert(0, self.cookies_entry_value)
-        self.cookies_entry.grid(row=2, column=3, pady=5, padx=10, sticky="w")
+        main_layout.addWidget(QLabel("Language Priority (comma-separated):"), 4, 0)
+        main_layout.addWidget(self.langs_entry, 4, 1, 1, 2)
 
-        # Quiet (use var from _load_config)
-        quiet_check = ttk.Checkbutton(
-            adv_frame,
-            text="Quiet Mode",
-            variable=self.quiet_var,
-        )
-        quiet_check.grid(row=3, column=0, padx=10, pady=5, sticky="w")
+        root.addWidget(main_group)
 
-        # Verbose (use var from _load_config)
-        verbose_check = ttk.Checkbutton(
-            adv_frame,
-            text="Verbose",
-            variable=self.verbose_var,
-        )
-        verbose_check.grid(row=3, column=1, padx=10, pady=5, sticky="w")
+        advanced_group = QGroupBox("Advanced Options")
+        advanced_layout = QGridLayout(advanced_group)
+        self._configure_grid_layout(advanced_layout, row_count=4)
+        advanced_layout.setColumnStretch(4, 1)
 
-        # Dark Mode (use variable created in __init__ by _load_config)
-        dark_mode_check = ttk.Checkbutton(
-            adv_frame,
-            text="Dark Mode (requires restart to take full effect)",
-            variable=self.dark_mode_var,
-            command=self._toggle_dark_mode,
-        )
-        dark_mode_check.grid(row=3, column=2, padx=10, pady=5, sticky="w")
+        self.no_auto_check = QCheckBox("Disable Auto Captions Fallback")
 
-        # Action Buttons
+        self.dedupe_combo = QComboBox()
+        self.dedupe_combo.addItems(["consecutive", "consecutive-overlap", "global", "none"])
 
-        button_frame = ttk.Frame(self)
-        button_frame.grid(row=4, column=0, padx=20, pady=10, sticky="ew")
+        self.no_merge_check = QCheckBox("Do Not Merge Captions")
+        self.keep_vtt_check = QCheckBox("Keep Downloaded VTT Working Directory")
+        self.list_subs_check = QCheckBox("List Subtitles and Exit")
+        self.summary_template_check = QCheckBox("Generate Summary Prompt")
 
-        self.start_button = ttk.Button(button_frame, text="Start", command=self.start, width=15)
-        self.start_button.grid(row=0, column=0, padx=10, pady=5)
+        self.cookies_entry = QLineEdit()
+        self.cookies_entry.setPlaceholderText("firefox, chrome, edge…")
 
-        self.cancel_button = ttk.Button(button_frame, text="Cancel", command=self.cancel, width=15, state="disabled")
-        self.cancel_button.grid(row=0, column=1, padx=10, pady=5)
+        self.quiet_check = QCheckBox("Quiet Mode")
+        self.verbose_check = QCheckBox("Verbose")
 
-        self.open_folder_button = ttk.Button(button_frame, text="Open Output Folder", command=self.open_output_folder, width=20)
-        self.open_folder_button.grid(row=0, column=2, padx=10, pady=5)
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(["light", "dark", "oled"])
+        self.theme_combo.currentTextChanged.connect(lambda _: self._apply_theme(save=True))
 
-        # Output / Log Section
-        log_frame = ttk.LabelFrame(self, text="Log")
-        log_frame.grid(row=5, column=0, padx=20, pady=10, sticky="nsew")
-        self.rowconfigure(5, weight=1)
+        advanced_layout.addWidget(self.no_auto_check, 0, 0)
+        advanced_layout.addWidget(QLabel("Deduplication Mode:"), 0, 1)
+        advanced_layout.addWidget(self.dedupe_combo, 0, 2)
 
-        self.log_text = tk.Text(log_frame, wrap="word", state="disabled", height=15)
-        scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
-        self.log_text.configure(yscrollcommand=scrollbar.set)
+        advanced_layout.addWidget(self.no_merge_check, 1, 0)
+        advanced_layout.addWidget(self.keep_vtt_check, 1, 1, 1, 2)
 
-        self.log_text.grid(row=0, column=0, sticky="nsew")
-        scrollbar.grid(row=0, column=1, sticky="ns")
+        advanced_layout.addWidget(self.list_subs_check, 2, 0)
+        advanced_layout.addWidget(self.summary_template_check, 2, 1)
+        advanced_layout.addWidget(QLabel("Cookies from Browser:"), 2, 2)
+        advanced_layout.addWidget(self.cookies_entry, 2, 3)
 
-        log_frame.columnconfigure(0, weight=1)
-        log_frame.rowconfigure(0, weight=1)
+        advanced_layout.addWidget(self.quiet_check, 3, 0)
+        advanced_layout.addWidget(self.verbose_check, 3, 1)
+        advanced_layout.addWidget(QLabel("Theme:"), 3, 2)
+        advanced_layout.addWidget(self.theme_combo, 3, 3)
 
-        # Status Line
-        self.status_var = tk.StringVar(value="Ready")
-        status_label = ttk.Label(self, textvariable=self.status_var, relief="sunken", anchor="w")
-        status_label.grid(row=6, column=0, padx=20, pady=10, sticky="ew")
+        root.addWidget(advanced_group)
 
+        button_row = QHBoxLayout()
+
+        self.start_button = QPushButton("Start")
+        self.start_button.setFixedWidth(120)
+        self.start_button.clicked.connect(self.start)
+
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.setFixedWidth(120)
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self.cancel)
+
+        self.open_folder_button = QPushButton("Open Output Folder")
+        self.open_folder_button.clicked.connect(self.open_output_folder)
+
+        button_row.addWidget(self.start_button)
+        button_row.addWidget(self.cancel_button)
+        button_row.addWidget(self.open_folder_button)
+        button_row.addItem(QSpacerItem(20, 20, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
+
+        root.addLayout(button_row)
+
+        log_group = QGroupBox("Log")
+        log_layout = QVBoxLayout(log_group)
+        log_layout.setContentsMargins(12, 22, 12, 12)
+        log_layout.setSpacing(8)
+
+        self.log_text = QPlainTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+
+        log_layout.addWidget(self.log_text)
+
+        root.addWidget(log_group, 1)
+
+        self.statusBar().showMessage("Ready")
+
+    def _load_values_into_ui(self) -> None:
+        self.outdir_entry.setText(str(self.config.get("outdir", str(Path.cwd()))))
+        self.output_name_entry.setText(str(self.config.get("output_name", "")))
+        self.langs_entry.setText(str(self.config.get("langs", ",".join(DEFAULT_LANG_PRIORITY))))
+        self.cookies_entry.setText(str(self.config.get("cookies_from_browser", "")))
+
+        set_combo_value(self.format_combo, str(self.config.get("format", "txt")))
+        set_combo_value(self.dedupe_combo, str(self.config.get("dedupe", "consecutive")))
+        set_combo_value(self.chapter_mode_combo, str(self.config.get("chapter_mode", "none")))
+        set_combo_value(self.theme_combo, str(self.config.get("theme", "oled")), fallback_index=2)
+
+        self.timestamps_check.setChecked(bool(self.config.get("with_timestamps", True)))
+        self.no_auto_check.setChecked(bool(self.config.get("no_auto", False)))
+        self.no_merge_check.setChecked(bool(self.config.get("no_merge", False)))
+        self.keep_vtt_check.setChecked(bool(self.config.get("keep_vtt", False)))
+        self.list_subs_check.setChecked(bool(self.config.get("list_subs", False)))
+        self.summary_template_check.setChecked(bool(self.config.get("summary_template", False)))
+        self.quiet_check.setChecked(bool(self.config.get("quiet", False)))
+        self.verbose_check.setChecked(bool(self.config.get("verbose", False)))
+
+    def _current_mode(self) -> str:
+        return "url" if self.single_url_radio.isChecked() else "file"
 
     def _toggle_url_file_fields(self) -> None:
-        """Toggle URL and URL file fields based on mode."""
-        mode = self.mode_var.get()
-        if mode == "url":
-            self.url_entry.configure(state="normal")
-            self.url_file_entry.configure(state="disabled")
-        else:
-            self.url_entry.configure(state="disabled")
-            self.url_file_entry.configure(state="normal")
+        url_mode = self._current_mode() == "url"
+
+        self.url_entry.setEnabled(url_mode)
+        self.url_file_entry.setEnabled(not url_mode)
+        self.url_file_browse_button.setEnabled(not url_mode)
 
     def browse_outdir(self) -> None:
-        """Browse for output directory."""
-        path = filedialog.askdirectory(title="Select Output Directory")
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Output Directory",
+            self.outdir_entry.text().strip() or str(Path.cwd()),
+        )
+
         if path:
-            self.outdir_entry.delete(0, tk.END)
-            self.outdir_entry.insert(0, path)
+            self.outdir_entry.setText(path)
 
     def browse_url_file(self) -> None:
-        """Browse for URL file."""
-        path = filedialog.askopenfilename(
-            title="Select URL File",
-            filetypes=[("Text Files", "*.txt"), ("All Files", "*.*")],
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select URL File",
+            str(Path.cwd()),
+            "Text Files (*.txt);;All Files (*.*)",
         )
+
         if path:
-            self.url_file_entry.delete(0, tk.END)
-            self.url_file_entry.insert(0, path)
+            self.url_file_entry.setText(path)
 
     def validate_form(self) -> List[str]:
-        """Validate the form and return list of errors."""
-        errors = []
+        errors: List[str] = []
 
-        mode = self.mode_var.get()
-        url = self.url_entry.get().strip()
-        url_file = self.url_file_entry.get().strip()
+        mode = self._current_mode()
+        url = self.url_entry.text().strip()
+        url_file = self.url_file_entry.text().strip()
 
         if mode == "url":
             if not url:
@@ -368,368 +643,356 @@ class TranscriptCleanerApp(tk.Tk):
             if url_file:
                 errors.append("URL file cannot be used in single URL mode.")
         else:
-            if not url_file :
+            if not url_file:
                 errors.append("URL file is required for batch mode.")
             if url:
                 errors.append("URL cannot be used in batch mode.")
 
-        outdir = self.outdir_entry.get().strip()
+        outdir = self.outdir_entry.text().strip()
         if not outdir:
             errors.append("Output directory is required.")
 
-        output_name = self.output_name_entry.get().strip()
+        output_name = self.output_name_entry.text().strip()
         if output_name and mode != "url":
             errors.append("Output name can only be used for single URL mode.")
 
-        fmt = self.format_var.get()
+        fmt = self.format_combo.currentText()
         if fmt not in OUTPUT_FORMATS:
             errors.append(f"Format must be one of: {', '.join(OUTPUT_FORMATS)}")
 
-        dedupe = self.dedupe_var.get()
+        dedupe = self.dedupe_combo.currentText()
         if dedupe not in ("consecutive", "consecutive-overlap", "global", "none"):
             errors.append("Deduplication mode must be one of: consecutive, consecutive-overlap, global, none")
+
+        chapter_mode = self.chapter_mode_combo.currentText()
+        if chapter_mode not in ("none", "inline", "files"):
+            errors.append("Chapter mode must be one of: none, inline, files")
 
         return errors
 
     def build_options(self) -> ProcessOptions:
-        """Build ProcessOptions from form values."""
-        langs_str = self.langs_entry.get().strip()
+        langs_str = self.langs_entry.text().strip()
         langs = [lang.strip() for lang in langs_str.split(",") if lang.strip()]
+
         if not langs:
             langs = DEFAULT_LANG_PRIORITY[:]
 
         return ProcessOptions(
             langs=langs,
-            outdir=Path(self.outdir_entry.get().strip()),
-            output_name=self.output_name_entry.get().strip() or None,
-            fmt=self.format_var.get(),
-            with_timestamps=self.timestamps_var.get(),
-            chapter_split=self.chapter_split_var.get(),
-            no_auto=self.no_auto_var.get(),
-            dedupe=self.dedupe_var.get(),
-            no_merge=self.no_merge_var.get(),
-            keep_vtt=self.keep_vtt_var.get(),
-            list_subs=self.list_subs_var.get(),
-            summary_template=self.summary_template_var.get(),
-            cookies_from_browser=self.cookies_entry.get().strip() or None,
-            quiet=self.quiet_var.get(),
-            verbose=self.verbose_var.get(),
+            outdir=Path(self.outdir_entry.text().strip()),
+            output_name=self.output_name_entry.text().strip() or None,
+            fmt=self.format_combo.currentText(),
+            with_timestamps=self.timestamps_check.isChecked(),
+            chapter_mode=self.chapter_mode_combo.currentText(),
+            no_auto=self.no_auto_check.isChecked(),
+            dedupe=self.dedupe_combo.currentText(),
+            no_merge=self.no_merge_check.isChecked(),
+            keep_vtt=self.keep_vtt_check.isChecked(),
+            list_subs=self.list_subs_check.isChecked(),
+            summary_template=self.summary_template_check.isChecked(),
+            cookies_from_browser=self.cookies_entry.text().strip() or None,
+            quiet=self.quiet_check.isChecked(),
+            verbose=self.verbose_check.isChecked(),
         )
 
     def start(self) -> None:
-        """Start processing."""
         errors = self.validate_form()
+
         if errors:
-            messagebox.showerror("Validation Error", "\n".join(errors))
+            QMessageBox.critical(self, "Validation Error", "\n".join(errors))
             return
 
-        self.set_running(True)
+        self._save_config()
         self.cancel_event.clear()
 
-        # Build URLs and options
-        mode = self.mode_var.get()
+        mode = self._current_mode()
+
         if mode == "url":
-            urls = [self.url_entry.get().strip()]
+            urls = [self.url_entry.text().strip()]
         else:
-            url_file = Path(self.url_file_entry.get().strip())
-            with url_file.open(encoding="utf-8") as f:
-                urls = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+            url_file = Path(self.url_file_entry.text().strip())
+
+            try:
+                with url_file.open(encoding="utf-8") as f:
+                    urls = [
+                        line.strip()
+                        for line in f
+                        if line.strip() and not line.lstrip().startswith("#")
+                    ]
+            except Exception as e:
+                QMessageBox.critical(self, "URL File Error", f"Could not read URL file:\n\n{e}")
+                return
 
         options = self.build_options()
 
-        # Start worker thread
-        self.worker_thread = threading.Thread(
-            target=self.worker,
-            args=(urls, options),
-            daemon=True,
-        )
+        self.set_running(True)
+        self.log("Starting...")
+
+        self.worker_thread = QThread(self)
+        self.worker = ProcessWorker(urls, options, self.cancel_event)
+        self.worker.moveToThread(self.worker_thread)
+
+        self.worker_thread.started.connect(self.worker.run)
+        self.worker.log.connect(self.log)
+        self.worker.done.connect(self._worker_done)
+        self.worker.error.connect(self._worker_error)
+        self.worker.status.connect(self.statusBar().showMessage)
+        self.worker.finished.connect(self.worker_thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.worker_thread.finished.connect(self.worker_thread.deleteLater)
+        self.worker_thread.finished.connect(self._thread_finished)
+
         self.worker_thread.start()
 
     def cancel(self) -> None:
-        """Cancel processing."""
-        if self.running:
-            self.cancel_event.set()
-            self.log("Cancellation requested...")
+        if not self.running:
+            return
+
+        self.cancel_event.set()
+        self.log("Cancellation requested...")
+        self.statusBar().showMessage("Cancelling...")
+        self.cancel_button.setEnabled(False)
+
+    @Slot(object)
+    def _worker_done(self, result_paths: object) -> None:
+        if isinstance(result_paths, list):
+            for path in result_paths:
+                self.log(f"Output: {path}")
 
         self.set_running(False)
 
-    def worker(self, urls: List[str], options: ProcessOptions) -> None:
-        """Worker thread processing function."""
-        try:
-            def log_callback(message: str) -> None:
-                self.queue.put(("log", message))
+    @Slot(str)
+    def _worker_error(self, message: str) -> None:
+        self.log(f"\nERROR:\n{message}")
+        QMessageBox.critical(self, "Error", f"An error occurred:\n\n{message}")
+        self.set_running(False)
 
-            result_paths = process_urls(
-                urls=urls,
-                options=options,
-                log_callback=log_callback,
-                cancel_event=self.cancel_event,
-            )
+    @Slot()
+    def _thread_finished(self) -> None:
+        self.worker_thread = None
+        self.worker = None
 
-            if not self.cancel_event.is_set():
-                self.queue.put(("done", result_paths))
-                self.queue.put(("log", f"\nCompleted. Generated {len(result_paths)} file(s)."))
-        except Exception:
-            import traceback
-            self.queue.put(("error", traceback.format_exc()))
-            self.queue.put(("status", "Error"))
+        if self.running:
+            self.set_running(False)
 
-    def poll_queue(self) -> None:
-        """Poll the queue for messages from worker thread."""
-        try:
-            while True:
-                msg_type, msg = self.queue.get_nowait()
-
-                if msg_type == "log":
-                    self.log(msg)
-                elif msg_type == "done":
-                    for path in msg:
-                        self.log(f"Output: {path}")
-                    self.set_running(False)
-                elif msg_type == "error":
-                    self.log(f"\nERROR:\n{msg}")
-                    messagebox.showerror("Error", f"An error occurred:\n\n{msg}")
-                    self.set_running(False)
-                elif msg_type == "status":
-                    self.status_var.set(msg)
-
-        except:
-            pass  # Queue is empty
-
-        self.after(100, self.poll_queue)
+        if self.closing_after_cancel:
+            self.closing_after_cancel = False
+            self.close()
 
     def log(self, message: str) -> None:
-        """Append a message to the log widget."""
-        self.log_text.configure(state="normal")
-        self.log_text.insert(tk.END, message + "\n")
-        self.log_text.see(tk.END)
-        self.log_text.configure(state="disabled")
+        self.log_text.appendPlainText(message)
+        self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
 
     def set_running(self, running: bool) -> None:
-        """Set the running state and update UI accordingly."""
         self.running = running
 
-        if running:
-            self.start_button.configure(state="disabled")
-            self.cancel_button.configure(state="normal")
-            self.status_var.set("Processing...")
-        else:
-            self.start_button.configure(state="normal")
-            self.cancel_button.configure(state="disabled")
-            self.status_var.set("Ready")
+        self.start_button.setEnabled(not running)
+        self.cancel_button.setEnabled(running)
+        self.statusBar().showMessage("Processing..." if running else "Ready")
 
     def open_output_folder(self) -> None:
-        """Open the output directory in file explorer."""
-        outdir = self.outdir_entry.get().strip()
+        outdir = self.outdir_entry.text().strip()
+
         if not outdir:
-            messagebox.showwarning("Warning", "No output directory specified.")
+            QMessageBox.warning(self, "Warning", "No output directory specified.")
             return
 
         path = Path(outdir)
+
         if not path.exists():
-            messagebox.showwarning("Warning", f"Output directory does not exist:\n{path}")
+            QMessageBox.warning(self, "Warning", f"Output directory does not exist:\n{path}")
             return
 
         path_str = str(path)
 
-        if platform.system() == "Windows":
-            os.startfile(path_str)
-        elif platform.system() == "Darwin":  # macOS
-            subprocess.run(["open", path_str], check=True)
-        else:  # Linux/Unix
-            subprocess.run(["xdg-open", path_str], check=True)
-
-    def _toggle_dark_mode(self) -> None:
-        """Toggle between dark and light mode."""
-        if self.dark_mode_var.get():
-            self._apply_dark_mode()
-        else:
-            self._apply_light_mode()
-        # Save the preference
-        self._save_config()
-
-
-    def _apply_dark_mode(self) -> None:
-        """Apply dark mode colors to ttk styles."""
         try:
-            style = ttk.Style()
-            style.theme_use('clam')
-            
-            # Configure frame style
-            style.configure("TFrame", background=DARK_BG)
-            style.configure("TLabelframe", background=DARK_BG, foreground=DARK_FG)
-            style.configure("TLabelframe.Label", background=DARK_BG, foreground=DARK_FG)
-            
-            # Configure label style
-            style.configure("TLabel", background=DARK_BG, foreground=DARK_FG)
-            style.configure("TCheckbutton", background=DARK_BG, foreground=DARK_FG)
-            style.configure("TRadiobutton", background=DARK_BG, foreground=DARK_FG)
-            
-            # Configure button style
-            style.configure("TButton", background=DARK_BUTTON_BG, foreground=DARK_BUTTON_FG, borderwidth=1)
-            style.map("TButton", background=[("active", DARK_BUTTON_HOVER), ("pressed", DARK_BUTTON_HOVER)])
-            
-            # Configure entry style
-            style.configure("TEntry", fieldbackground=DARK_ENTRY_BG, foreground=DARK_ENTRY_FG, insertcolor=DARK_FG)
-            
-            # Configure combobox style
-            style.configure("TCombobox", fieldbackground=DARK_ENTRY_BG, foreground=DARK_ENTRY_FG, background=DARK_BG)
-            style.map("TCombobox", selectbackground=[("readonly", DARK_SELECT_BG)], selectforeground=[("readonly", DARK_SELECT_FG)])
-            
-            # Configure scrollbar
-            style.configure("TScrollbar", background=DARK_FRAME_BG, troughcolor=DARK_BG, bordercolor=DARK_BG, darkcolor=DARK_BG, lightcolor=DARK_BG)
-            
-            # Configure label frame
-            style.configure("TLabelframe", background=DARK_BG, foreground=DARK_FG)
-            style.configure("TLabelframe.Label", background=DARK_BG, foreground=DARK_FG)
-            
-            # Configure radiobutton
-            style.configure("TRadiobutton", background=DARK_BG, foreground=DARK_FG)
-            
-            self.configure(bg=DARK_BG)
-            self.log_text.configure(bg=DARK_ENTRY_BG, fg=DARK_ENTRY_FG, insertbackground=DARK_FG)
-            
-        except Exception as e:
-            print(f"Error applying dark mode: {e}")
-
-    def _apply_light_mode(self) -> None:
-        """Apply light mode colors (restore defaults)."""
-        try:
-            style = ttk.Style()
-            # Try to restore Windows native theme if on Windows, otherwise use 'default'
             if platform.system() == "Windows":
-                try:
-                    style.theme_use('vista')
-                except:
-                    try:
-                        style.theme_use('winnative')
-                    except:
-                        style.theme_use('clam')
+                os.startfile(path_str)  # type: ignore[attr-defined]
+            elif platform.system() == "Darwin":
+                subprocess.run(["open", path_str], check=True)
             else:
-                style.theme_use('default')
-            
-            # Reset to defaults
-            style.configure("TFrame", background="")
-            style.configure("TLabelframe", background="", foreground="")
-            style.configure("TLabelframe.Label", background="", foreground="")
-            style.configure("TLabel", background="", foreground="")
-            style.configure("TCheckbutton", background="", foreground="")
-            style.configure("TRadiobutton", background="", foreground="")
-            style.configure("TButton", background="", foreground="", borderwidth="")
-            style.map("TButton", background="")
-            style.configure("TEntry", fieldbackground="", foreground="", insertcolor="")
-            style.configure("TCombobox", fieldbackground="", foreground="", background="")
-            style.map("TCombobox", selectbackground=[], selectforeground=[])
-            style.configure("TScrollbar", background="")
-            
-            self.configure(bg="")
-            self.log_text.configure(bg="", fg="", insertbackground="")
-            
+                subprocess.run(["xdg-open", path_str], check=True)
         except Exception as e:
-            print(f"Error applying light mode: {e}")
+            QMessageBox.critical(self, "Error", f"Could not open output folder:\n\n{e}")
+
+    def _apply_theme(self, save: bool = True) -> None:
+        theme = self.theme_combo.currentText() if hasattr(self, "theme_combo") else self.config.get("theme", "oled")
+
+        if theme not in ("light", "dark", "oled"):
+            theme = "oled"
+
+        app = QApplication.instance()
+
+        if app is not None:
+            app.setStyle("Fusion")
+            app.setStyleSheet(qss_for_theme(theme))
+
+            try:
+                from PySide6.QtGui import QGuiApplication
+
+                scheme = Qt.ColorScheme.Light if theme == "light" else Qt.ColorScheme.Dark
+                QGuiApplication.styleHints().setColorScheme(scheme)
+            except Exception:
+                pass
+
+        self._apply_windows_titlebar()
+
+        if save:
+            self._save_config()
+
+    def _apply_windows_titlebar(self) -> None:
+        if platform.system() != "Windows":
+            return
+
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            hwnd = int(self.winId())
+            theme = self.theme_combo.currentText() if hasattr(self, "theme_combo") else "oled"
+            c = THEME_COLORS.get(theme, THEME_COLORS["oled"])
+
+            dwmapi = ctypes.WinDLL("dwmapi")
+
+            if hasattr(wintypes, "HRESULT"):
+                HRESULT = wintypes.HRESULT
+            else:
+                HRESULT = ctypes.c_long
+
+            DwmSetWindowAttribute = dwmapi.DwmSetWindowAttribute
+            DwmSetWindowAttribute.argtypes = [
+                wintypes.HWND,
+                wintypes.DWORD,
+                ctypes.c_void_p,
+                wintypes.DWORD,
+            ]
+            DwmSetWindowAttribute.restype = HRESULT
+
+            dark_enabled = ctypes.c_int(0 if theme == "light" else 1)
+
+            for attr in (20, 19):
+                DwmSetWindowAttribute(
+                    wintypes.HWND(hwnd),
+                    attr,
+                    ctypes.byref(dark_enabled),
+                    ctypes.sizeof(dark_enabled),
+                )
+
+            def colorref(hex_color: str) -> int:
+                value = hex_color.lstrip("#")
+                r = int(value[0:2], 16)
+                g = int(value[2:4], 16)
+                b = int(value[4:6], 16)
+                return r | (g << 8) | (b << 16)
+
+            DWMWA_BORDER_COLOR = 34
+            DWMWA_CAPTION_COLOR = 35
+            DWMWA_TEXT_COLOR = 36
+
+            caption = ctypes.c_int(colorref(c["titlebar"]))
+            text = ctypes.c_int(colorref(c["titlebar_text"]))
+            border = ctypes.c_int(colorref(c["titlebar"]))
+
+            DwmSetWindowAttribute(
+                wintypes.HWND(hwnd),
+                DWMWA_CAPTION_COLOR,
+                ctypes.byref(caption),
+                ctypes.sizeof(caption),
+            )
+            DwmSetWindowAttribute(
+                wintypes.HWND(hwnd),
+                DWMWA_TEXT_COLOR,
+                ctypes.byref(text),
+                ctypes.sizeof(text),
+            )
+            DwmSetWindowAttribute(
+                wintypes.HWND(hwnd),
+                DWMWA_BORDER_COLOR,
+                ctypes.byref(border),
+                ctypes.sizeof(border),
+            )
+        except Exception as e:
+            print(f"Warning: could not apply Windows title bar theme: {e}")
 
     def _save_config(self) -> None:
-        """Save configuration to file."""
         try:
-            # Get output directory from the entry field
-            outdir = self.outdir_entry.get().strip() if hasattr(self, 'outdir_entry') else str(Path.cwd())
+            outdir = self.outdir_entry.text().strip() if hasattr(self, "outdir_entry") else str(Path.cwd())
+
             if not outdir:
                 outdir = str(Path.cwd())
 
-            # Get language priority from the entry field
-            langs = self.langs_entry.get().strip() if hasattr(self, 'langs_entry') else "en-orig,en,en-US,en-GB"
+            langs = self.langs_entry.text().strip() if hasattr(self, "langs_entry") else ",".join(DEFAULT_LANG_PRIORITY)
+
             if not langs:
-                langs = "en-orig,en,en-US,en-GB"
-
-            # Get cookies from browser from the entry field
-            cookies = self.cookies_entry.get().strip() if hasattr(self, 'cookies_entry') else ""
-
-            # Get output name from the entry field
-            output_name = self.output_name_entry.get().strip() if hasattr(self, 'output_name_entry') else ""
+                langs = ",".join(DEFAULT_LANG_PRIORITY)
 
             config = {
-                "dark_mode": self.dark_mode_var.get(),
-                "dedupe": self.dedupe_var.get(),
-                "format": self.format_var.get(),
-                "with_timestamps": self.timestamps_var.get(),
-                "chapter_split": self.chapter_split_var.get(),
-                "no_auto": self.no_auto_var.get(),
-                "no_merge": self.no_merge_var.get(),
-                "keep_vtt": self.keep_vtt_var.get(),
-                "list_subs": self.list_subs_var.get(),
-                "summary_template": self.summary_template_var.get(),
-                "quiet": self.quiet_var.get(),
-                "verbose": self.verbose_var.get(),
+                "theme": self.theme_combo.currentText(),
+                "dedupe": self.dedupe_combo.currentText(),
+                "format": self.format_combo.currentText(),
+                "with_timestamps": self.timestamps_check.isChecked(),
+                "chapter_mode": self.chapter_mode_combo.currentText(),
+                "no_auto": self.no_auto_check.isChecked(),
+                "no_merge": self.no_merge_check.isChecked(),
+                "keep_vtt": self.keep_vtt_check.isChecked(),
+                "list_subs": self.list_subs_check.isChecked(),
+                "summary_template": self.summary_template_check.isChecked(),
+                "quiet": self.quiet_check.isChecked(),
+                "verbose": self.verbose_check.isChecked(),
                 "langs": langs,
-                "cookies_from_browser": cookies,
-                "output_name": output_name,
+                "cookies_from_browser": self.cookies_entry.text().strip(),
+                "output_name": self.output_name_entry.text().strip(),
                 "outdir": outdir,
             }
+
             with CONFIG_FILE.open("w", encoding="utf-8") as f:
                 json.dump(config, f, indent=2)
         except Exception as e:
             print(f"Error saving config: {e}")
 
-
-    def _load_config(self) -> None:
-        """Load configuration from file and create all Var objects."""
-        # Default values
-        config_defaults = {
-            "dark_mode": False,
-            "dedupe": "consecutive",
-            "format": "txt",
-            "with_timestamps": True,
-            "chapter_split": False,
-            "no_auto": False,
-            "no_merge": False,
-            "keep_vtt": False,
-            "list_subs": False,
-            "summary_template": False,
-            "quiet": False,
-            "verbose": False,
-            "langs": "en-orig,en,en-US,en-GB",
-            "outdir": str(Path.cwd()),
-            "cookies_from_browser": "",
-            "output_name": "",
-        }
-
-        # Load from config file if it exists
-        if CONFIG_FILE.exists():
-            try:
-                with CONFIG_FILE.open("r", encoding="utf-8") as f:
-                    loaded_config = json.load(f)
-                    # Update defaults with loaded values
-                    config_defaults.update(loaded_config)
-            except Exception as e:
-                print(f"Error loading config: {e}")
-
-        # Create all Var objects based on loaded/default values
-        self.dark_mode_var = tk.BooleanVar(value=config_defaults["dark_mode"])
-        self.dedupe_var = tk.StringVar(value=config_defaults["dedupe"])
-        self.format_var = tk.StringVar(value=config_defaults["format"])
-        self.timestamps_var = tk.BooleanVar(value=config_defaults["with_timestamps"])
-        self.chapter_split_var = tk.BooleanVar(value=config_defaults["chapter_split"])
-        self.no_auto_var = tk.BooleanVar(value=config_defaults["no_auto"])
-        self.no_merge_var = tk.BooleanVar(value=config_defaults["no_merge"])
-        self.keep_vtt_var = tk.BooleanVar(value=config_defaults["keep_vtt"])
-        self.list_subs_var = tk.BooleanVar(value=config_defaults["list_subs"])
-        self.summary_template_var = tk.BooleanVar(value=config_defaults["summary_template"])
-        self.quiet_var = tk.BooleanVar(value=config_defaults["quiet"])
-        self.verbose_var = tk.BooleanVar(value=config_defaults["verbose"])
-        self.cookies_entry_value = config_defaults["cookies_from_browser"]
-        self.output_name_value = config_defaults["output_name"]
-        self.outdir_value = config_defaults["outdir"]
-        self.langs_entry_value = config_defaults["langs"]
-
-
-    def _on_closing(self) -> None:
-        """Handle window closing - save config before exit."""
+    def closeEvent(self, event: QCloseEvent) -> None:
         self._save_config()
-        self.destroy()
+
+        if self.running:
+            response = QMessageBox.question(
+                self,
+                "Processing is running",
+                "Processing is still running. Cancel and close when it stops?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+
+            if response == QMessageBox.StandardButton.Yes:
+                self.closing_after_cancel = True
+                self.cancel()
+                event.ignore()
+            else:
+                event.ignore()
+
+            return
+
+        event.accept()
 
 
 def run_gui() -> int:
     """Run the GUI application."""
-    app = TranscriptCleanerApp()
-    app.mainloop()
+    if platform.system() == "Windows":
+        os.environ.setdefault("QT_QPA_PLATFORM", "windows:darkmode=2")
+
+    app = QApplication.instance()
+    owns_app = app is None
+
+    if app is None:
+        app = QApplication(sys.argv)
+
+    app.setApplicationName("YouTube Transcript Cleaner")
+    app.setStyle("Fusion")
+
+    window = TranscriptCleanerWindow()
+    window.show()
+    QTimer.singleShot(0, window._apply_windows_titlebar)
+
+    if owns_app:
+        return int(app.exec())
+
     return 0

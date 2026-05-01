@@ -67,7 +67,13 @@ class ProcessOptions:
     output_name: Optional[str]
     fmt: str
     with_timestamps: bool
-    chapter_split: bool
+    # OLD:
+    # chapter_split: bool
+    # NEW: chapter handling mode:
+    #   "none"   -> single file, no chapter headings
+    #   "inline" -> single file, chapters as headings/sections
+    #   "files"  -> one file per chapter
+    chapter_mode: str
     no_auto: bool
     dedupe: str
     no_merge: bool
@@ -77,6 +83,7 @@ class ProcessOptions:
     cookies_from_browser: Optional[str]
     quiet: bool
     verbose: bool
+
 
 
 def normalize_url_or_id(value: str) -> str:
@@ -610,12 +617,23 @@ def assign_chapters(blocks: List[Block], chapters: List[dict]) -> List[Block]:
     return blocks
 
 
-def render_txt(blocks: List[Block], with_timestamps: bool) -> str:
-    """Render blocks as plain text."""
-    parts = []
+def render_txt(blocks: List[Block], with_timestamps: bool, chapter_mode: str) -> str:
+    """Render blocks as plain text.
+
+    When chapter_mode == "inline", insert simple chapter headings.
+    """
+    parts: List[str] = []
+
+    current_chapter: Optional[str] = None
     for block in blocks:
+        # Insert chapter heading when requested
+        if chapter_mode == "inline" and block.chapter_title and block.chapter_title != current_chapter:
+            current_chapter = block.chapter_title
+            parts.append(f"=== {current_chapter} ===")
+
         prefix = f"[{format_timestamp(block.start)}] " if with_timestamps else ""
         parts.append(prefix + block.text)
+
     return "\n\n".join(parts).strip() + "\n"
 
 
@@ -623,14 +641,34 @@ def render_md(
     blocks: List[Block],
     with_timestamps: bool,
     title: str,
+    chapter_mode: str,
     chapter_title: Optional[str] = None,
 ) -> str:
-    """Render blocks as Markdown."""
-    lines = [f"# {title}", ""]
-    if chapter_title:
+    """Render blocks as Markdown.
+
+    Modes:
+
+    - chapter_mode == "none" and chapter_title is None:
+        Single transcript file, no per-chapter headings.
+    - chapter_mode == "none" and chapter_title is not None:
+        Per-chapter file: # title, ## chapter_title.
+    - chapter_mode == "inline":
+        Single file: # title, then ## chapter headings inline.
+    """
+    lines: List[str] = [f"# {title}", ""]
+
+    if chapter_mode == "none" and chapter_title:
+        # Per-chapter file: add chapter heading at top
         lines += [f"## {chapter_title}", ""]
 
+    current_chapter: Optional[str] = None
+
     for block in blocks:
+        # Inline chapter headings when requested
+        if chapter_mode == "inline" and block.chapter_title and block.chapter_title != current_chapter:
+            current_chapter = block.chapter_title
+            lines += [f"## {current_chapter}", ""]
+
         prefix = f"`{format_timestamp(block.start)}` " if with_timestamps else ""
         lines.append(prefix + block.text)
         lines.append("")
@@ -638,18 +676,25 @@ def render_md(
     return "\n".join(lines).rstrip() + "\n"
 
 
+
 def render_json(
     blocks: List[Block],
     info: VideoInfo,
     with_timestamps: bool,
+    chapter_mode: str,
     chapter_title: Optional[str] = None,
 ) -> str:
-    """Render blocks as JSON."""
+    """Render blocks as JSON.
+
+    For chapter_mode "inline" or "none", all chapters appear in a single
+    JSON file, distinguished by each block's "chapter" field.
+    """
     data = {
         "video_id": info.video_id,
         "title": info.title,
         "url": info.webpage_url,
         "chapter": chapter_title,
+        "chapter_mode": chapter_mode,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "blocks": [],
     }
@@ -669,8 +714,12 @@ def render_json(
     return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
 
 
-def render_csv(blocks: List[Block], with_timestamps: bool) -> str:
-    """Render blocks as CSV."""
+def render_csv(blocks: List[Block], with_timestamps: bool, chapter_mode: str) -> str:
+    """Render blocks as CSV.
+
+    chapter_mode is included for API consistency but does not change the layout:
+    chapter information is represented by the 'chapter' column.
+    """
     output = io.StringIO()
     fieldnames = ["chapter", "text"]
 
@@ -704,18 +753,42 @@ def render_output(
     blocks: List[Block],
     info: VideoInfo,
     with_timestamps: bool,
+    chapter_mode: str,
     chapter_title: Optional[str] = None,
 ) -> str:
-    """Render blocks in the specified format."""
+    """Render blocks in the specified format.
+
+    chapter_mode:
+        - "none":   plain single transcript (optionally per-chapter file when chapter_title is set)
+        - "inline": chapters represented inline within a single file (txt/md)
+        - "files":  handled by caller (per-chapter files)
+    """
     if fmt == "txt":
-        return render_txt(blocks, with_timestamps)
+        return render_txt(blocks, with_timestamps, chapter_mode)
+
     if fmt == "md":
-        return render_md(blocks, with_timestamps, info.title, chapter_title)
+        return render_md(
+            blocks=blocks,
+            with_timestamps=with_timestamps,
+            title=info.title,
+            chapter_mode=chapter_mode,
+            chapter_title=chapter_title,
+        )
+
     if fmt == "json":
-        return render_json(blocks, info, with_timestamps, chapter_title)
+        return render_json(
+            blocks=blocks,
+            info=info,
+            with_timestamps=with_timestamps,
+            chapter_mode=chapter_mode,
+            chapter_title=chapter_title,
+        )
+
     if fmt == "csv":
-        return render_csv(blocks, with_timestamps)
+        return render_csv(blocks, with_timestamps, chapter_mode)
+
     raise AppError(f"Unsupported output format: {fmt}")
+
 
 
 def extension_for_format(fmt: str) -> str:
@@ -757,9 +830,15 @@ def write_outputs(
     output_name: Optional[str],
     fmt: str,
     with_timestamps: bool,
-    chapter_split: bool,
+    chapter_mode: str,
 ) -> List[Path]:
-    """Write output files in the specified format."""
+    """Write output files according to the chapter mode.
+
+    chapter_mode:
+        - "none":   single transcript file, no explicit chapter grouping
+        - "inline": single transcript file, chapters represented inline
+        - "files":  one file per chapter (chapter directory)
+    """
     outdir.mkdir(parents=True, exist_ok=True)
     ext = extension_for_format(fmt)
     written: List[Path] = []
@@ -769,31 +848,60 @@ def write_outputs(
     else:
         base = sanitize_filename(info.title, fallback=info.video_id)
 
-    if not chapter_split:
-        path = outdir / f"{base}{ext}"
+    # Helper: write a single combined file
+    def write_single(path: Path, chapter_mode: str) -> None:
+        text = render_output(
+            fmt=fmt,
+            blocks=blocks,
+            info=info,
+            with_timestamps=with_timestamps,
+            chapter_mode=chapter_mode,
+        )
         path.write_text(
-            render_output(fmt, blocks, info, with_timestamps),
+            text,
             encoding="utf-8",
             newline="" if fmt == "csv" else None,
         )
+
+    # No chapter splitting – single file with no explicit chapter sections
+    if chapter_mode == "none":
+        path = outdir / f"{base}{ext}"
+        write_single(path, chapter_mode="none")
         return [path]
 
-    chapter_dir = outdir / f"{base}.chapters"
-    chapter_dir.mkdir(parents=True, exist_ok=True)
+    # Inline chapter mode – single file, chapters represented inside
+    if chapter_mode == "inline":
+        path = outdir / f"{base}{ext}"
+        write_single(path, chapter_mode="inline")
+        return [path]
 
-    chapter_groups = group_blocks_by_chapter(blocks, info.chapters)
+    # Per-chapter files mode ("files") – existing behavior
+    if chapter_mode == "files":
+        chapter_dir = outdir / f"{base}.chapters"
+        chapter_dir.mkdir(parents=True, exist_ok=True)
 
-    for idx, (chapter_title, chapter_blocks) in enumerate(chapter_groups, start=1):
-        filename = f"{idx:03d}-{sanitize_filename(chapter_title, fallback='chapter')}{ext}"
-        path = chapter_dir / filename
-        path.write_text(
-            render_output(fmt, chapter_blocks, info, with_timestamps, chapter_title),
-            encoding="utf-8",
-            newline="" if fmt == "csv" else None,
-        )
-        written.append(path)
+        chapter_groups = group_blocks_by_chapter(blocks, info.chapters)
 
-    return written
+        for idx, (chapter_title, chapter_blocks) in enumerate(chapter_groups, start=1):
+            filename = f"{idx:03d}-{sanitize_filename(chapter_title, fallback='chapter')}{ext}"
+            path = chapter_dir / filename
+            path.write_text(
+                render_output(
+                    fmt=fmt,
+                    blocks=chapter_blocks,
+                    info=info,
+                    with_timestamps=with_timestamps,
+                    chapter_mode="none",  # chapter_title already baked into filename/content
+                    chapter_title=chapter_title,
+                ),
+                encoding="utf-8",
+                newline="" if fmt == "csv" else None,
+            )
+            written.append(path)
+        return written
+
+    raise AppError(f"Unsupported chapter mode: {chapter_mode}")
+
 
 
 def write_summary_template(
@@ -907,7 +1015,7 @@ def process_one_url(
         output_name=options.output_name,
         fmt=options.fmt,
         with_timestamps=options.with_timestamps,
-        chapter_split=options.chapter_split,
+        chapter_mode=options.chapter_mode,
     )
 
     if options.summary_template:

@@ -93,9 +93,29 @@ def parse_args() -> argparse.Namespace:
     parser.set_defaults(with_timestamps=None)
 
     chapter_group = parser.add_mutually_exclusive_group()
-    chapter_group.add_argument("--chapter-split", dest="chapter_split", action="store_true")
-    chapter_group.add_argument("--no-chapter-split", dest="chapter_split", action="store_false")
-    parser.set_defaults(chapter_split=None)
+    chapter_group.add_argument(
+        "--chapter-split",
+        dest="chapter_mode",
+        action="store_const",
+        const="files",
+        help="Split output into per-chapter files.",
+    )
+    chapter_group.add_argument(
+        "--chapter-inline",
+        dest="chapter_mode",
+        action="store_const",
+        const="inline",
+        help="Keep a single file but insert chapter sections/headings.",
+    )
+    chapter_group.add_argument(
+        "--no-chapter-split",
+        dest="chapter_mode",
+        action="store_const",
+        const="none",
+        help="Do not split by chapters (default).",
+    )
+    parser.set_defaults(chapter_mode=None)
+
 
     parser.add_argument("--no-auto", action="store_true", help="Do not use auto-generated subtitles as fallback.")
     parser.add_argument(
@@ -118,16 +138,20 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def resolve_promptable_options(args: argparse.Namespace) -> tuple[str, bool, bool]:
-    """Resolve options that may be prompted for if not provided."""
+def resolve_promptable_options(args: argparse.Namespace) -> tuple[str, bool, str]:
+    """Resolve options that may be prompted for if not provided.
+
+    Returns:
+        (fmt, with_timestamps, chapter_mode)
+    """
     if args.quiet and (
         args.format is None
         or args.with_timestamps is None
-        or args.chapter_split is None
+        or args.chapter_mode is None
     ):
         raise AppError(
             "--quiet requires --format, --with-timestamps/--no-timestamps, "
-            "and --chapter-split/--no-chapter-split."
+            "--chapter-split/--chapter-inline/--no-chapter-split."
         )
 
     fmt = args.format
@@ -138,12 +162,12 @@ def resolve_promptable_options(args: argparse.Namespace) -> tuple[str, bool, boo
     if with_timestamps is None:
         with_timestamps = prompt_yes_no("Include timestamps?", default=True)
 
-    chapter_split = args.chapter_split
-    if chapter_split is None:
-        chapter_split = prompt_yes_no("Split transcript by chapters when available?", default=False)
+    chapter_mode = args.chapter_mode
+    if chapter_mode is None:
+        split = prompt_yes_no("Split transcript by chapters when available?", default=False)
+        chapter_mode = "files" if split else "none"
 
-    return fmt, with_timestamps, chapter_split
-
+    return fmt, with_timestamps, chapter_mode
 
 def main() -> int:
     """Main entry point for the CLI."""
@@ -171,8 +195,9 @@ def main() -> int:
         if args.list_subs:
             list_urls = urls
         else:
-            fmt, with_timestamps, chapter_split = resolve_promptable_options(args)
+            fmt, with_timestamps, chapter_mode = resolve_promptable_options(args)
             list_urls = []
+
 
         options = ProcessOptions(
             langs=parse_langs(args.langs),

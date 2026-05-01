@@ -226,6 +226,7 @@ python -m yt_transcript_cleaner --cli \
 --with-timestamps      Include timing information
 --no-timestamps        Exclude timing information
 --chapter-split        Split output into per-chapter files when video chapters are available
+--chapter-inline       Keep a single file but insert chapter sections/headings
 --no-chapter-split     Keep a single transcript file (no per-chapter splitting)
 --no-auto              Do not use auto-generated captions
 --dedupe {consecutive,consecutive-overlap,global,none}
