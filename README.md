@@ -2,7 +2,9 @@
 
 A Python desktop and command-line application for downloading and cleaning YouTube subtitles into readable transcript files.
 
-It uses `yt-dlp` to download subtitles from YouTube videos and converts them to TXT, Markdown, JSON, or CSV. It supports manual captions, auto-generated captions, language priority, optional timestamps, chapter-aware splitting, batch processing, configurable deduplication, dark mode, settings that persist between sessions, and desktop GUI and CLI interfaces.
+It uses `yt-dlp` to download subtitles from YouTube videos and converts them to TXT, Markdown, JSON, or CSV. It supports manual captions, auto-generated captions, language priority, optional timestamps, chapter-aware splitting or inline chapter headings, batch processing, configurable deduplication, dark and OLED themes, settings that persist between sessions, and desktop GUI and CLI interfaces.
+
+The desktop GUI is implemented using **PySide6 (Qt)**, and the core logic is shared with the CLI.
 
 ## Features
 
@@ -12,13 +14,17 @@ It uses `yt-dlp` to download subtitles from YouTube videos and converts them to 
   - `consecutive`: removes exact duplicate cues that appear directly after each other
   - `consecutive-overlap`: removes rolling-caption overlap from adjacent cues, useful for YouTube auto-generated captions
   - `global`: removes repeated cue text across the whole transcript
+  - `none`: no deduplication
 - Optional timestamps
-- Chapter-aware splitting: optionally split output into separate per-chapter files when video chapters are available
+- Chapter-aware handling:
+  - `none`: single transcript file with no explicit chapter headings
+  - `inline`: single transcript file with chapter headings/sections inserted inline
+  - `files`: optionally split output into separate per-chapter files when video chapters are available
 - Batch processing from a URL list file
 - Language priority for subtitle selection
 - Manual and auto-generated captions
-- Desktop GUI using tkinter
-- Dark mode support
+- Desktop GUI using **PySide6 (Qt)**
+- Dark and OLED theme support (with best-effort Windows dark title bar integration)
 - Configurable options that persist between sessions
 - Command-line interface for automated workflows
 - Cross-platform support for Windows, macOS, and Linux
@@ -101,6 +107,7 @@ Disables deduplication.
 
 - Python 3.10 or newer
 - `yt-dlp`
+- `PySide6` (for the GUI)
 
 ### Install from source
 
@@ -135,7 +142,10 @@ Install dependencies:
 python -m pip install -r requirements.txt
 ```
 
-The main external dependency is `yt-dlp`.
+The main external dependencies are:
+
+- `yt-dlp` – for downloading subtitles
+- `PySide6` – for the Qt-based desktop GUI
 
 ## Usage
 
@@ -149,7 +159,9 @@ python -m yt_transcript_cleaner
 
 This opens the graphical interface where you can enter a YouTube URL or video ID, choose an output directory, select output options, and start processing.
 
-GUI settings are saved between sessions in a JSON config file, so options such as output format, timestamp preference, deduplication mode, theme, and other choices can be reused the next time you open the app.
+GUI settings are saved between sessions in a JSON config file, so options such as output format, timestamp preference, deduplication mode, theme (light/dark/OLED), chapter mode, and other choices can be reused the next time you open the app.
+
+On Windows 11, the GUI attempts to align the title bar with the selected theme using Qt and system APIs; the exact appearance may still depend on your OS theme and personalization settings.
 
 ### CLI mode
 
@@ -191,6 +203,15 @@ python -m yt_transcript_cleaner --cli \
   --url "VIDEO_ID" \
   --with-timestamps \
   --chapter-split
+```
+
+Keep a single file but insert chapter headings inline:
+
+```bash
+python -m yt_transcript_cleaner --cli \
+  --url "VIDEO_ID" \
+  --with-timestamps \
+  --chapter-inline
 ```
 
 Batch process multiple videos from a file:
@@ -254,11 +275,33 @@ Plain text with optional timestamps:
 [00:01:30] Let's start with variables and data types.
 ```
 
+When `chapter_mode="inline"` (or `--chapter-inline`), chapter headings (when available) are inserted inline:
+
+```text
+=== Introduction ===
+
+[00:00:05] Welcome to this video about Python programming.
+
+=== Basics ===
+
+[00:01:30] Let's start with variables and data types.
+```
+
 ### Markdown
 
-Markdown output with a title heading and optional timestamps. When `--chapter-split` is used, each per-chapter file contains the video title as `#` and the chapter title as `##`.
+Markdown output with a title heading and optional timestamps.
 
-Example per-chapter Markdown file:
+Example single-file (no chapter split):
+
+```markdown
+# Python Programming Basics
+
+`00:00:05` Welcome to this video about Python programming.
+
+`00:00:12` Today we'll cover the basics and get you started.
+```
+
+When using per-chapter files (`--chapter-split` / `chapter_mode="files"`), each per-chapter file contains the video title as `#` and the chapter title as `##`:
 
 ```markdown
 # Python Programming Basics
@@ -270,6 +313,8 @@ Example per-chapter Markdown file:
 `00:00:12` Today we'll cover the basics and get you started.
 ```
 
+When using inline chapters (`--chapter-inline` / `chapter_mode="inline"`), all chapters are combined into one file with `##` headings within it.
+
 ### JSON
 
 Structured output with metadata and transcript blocks:
@@ -280,6 +325,7 @@ Structured output with metadata and transcript blocks:
   "title": "Python Programming Basics",
   "url": "https://www.youtube.com/watch?v=abc123",
   "chapter": null,
+  "chapter_mode": "inline",
   "generated_at": "2024-01-15T10:30:00.123456+00:00",
   "blocks": [
     {
@@ -294,6 +340,8 @@ Structured output with metadata and transcript blocks:
 }
 ```
 
+For per-chapter JSON files (`chapter_mode="files"`), each file includes the top-level `"chapter"` name for that file.
+
 ### CSV
 
 Tabular output suitable for spreadsheets or data analysis:
@@ -302,6 +350,8 @@ Tabular output suitable for spreadsheets or data analysis:
 start,end,start_seconds,end_seconds,chapter,text
 00:00:05,00:00:12,5.000,12.000,Introduction,Welcome to this video about Python programming.
 ```
+
+The `chapter` column indicates which chapter each row belongs to (if chapters are available).
 
 ## Caption selection
 
@@ -358,14 +408,18 @@ Supported browsers depend on `yt-dlp`, but commonly include:
 chrome, chromium, brave, edge, firefox, opera, safari
 ```
 
-## Chapter-based splitting
+## Chapter-based handling
 
-When chapter splitting is enabled with `--chapter-split` and the video has chapters, the tool:
+When chapters are available, you can choose how they are represented in the output:
 
-- Assigns each text block to a chapter based on its start time.
-- Writes one output file per chapter into a `{base}.chapters/` directory, where `{base}` is derived from the video title or `--output-name`.
+- `--no-chapter-split` / `chapter_mode="none"`:
+  - Single transcript file, no explicit chapter headings.
+- `--chapter-inline` / `chapter_mode="inline"`:
+  - Single transcript file with chapter headings inserted inline.
+- `--chapter-split` / `chapter_mode="files"`:
+  - One file per chapter in a `{base}.chapters/` directory, where `{base}` is derived from the video title or `--output-name`.
 
-For example, Markdown output might produce:
+For example, Markdown per-chapter output might produce:
 
 ```text
 My Video Title.chapters/
@@ -386,11 +440,7 @@ Inside each per-chapter Markdown file, the structure looks like:
 `00:00:30` In this part, we talk about the basics.
 ```
 
-For JSON output, each per-chapter file includes the chapter name in the `"chapter"` field of the top-level object.
-
 If no chapters are available, the tool writes a single transcript file instead of per-chapter files.
-
-> Note: A future version may also support inserting chapter headings into a single combined transcript file. The current behavior is to split into per-chapter files.
 
 ## Troubleshooting
 
@@ -460,6 +510,7 @@ python -m yt_transcript_cleaner --cli --url "VIDEO_ID" --list-subs
 ```text
 yt-transcript-cleaner/
 ├── README.md
+├── CHANGELOG.md
 ├── LICENSE
 ├── requirements.txt
 ├── .gitignore
@@ -479,7 +530,7 @@ The application is split into a reusable core module and two interfaces.
 
 `cli.py` provides the command-line interface.
 
-`gui.py` provides the tkinter desktop interface and uses background threading so processing does not block the GUI.
+`gui.py` provides the PySide6 (Qt) desktop interface and uses background threading (Qt’s `QThread`) so processing does not block the GUI.
 
 Settings are persisted between sessions in a JSON config file.
 
@@ -494,4 +545,3 @@ This tool depends on `yt-dlp`, which is released under the Unlicense.
 ## Contributing
 
 Contributions are welcome. Please keep the core logic independent from the GUI and CLI layers so both interfaces continue to behave consistently.
->>>>>>> 18fb7e6 (Initial commit: add yt-transcript-cleaner project)
